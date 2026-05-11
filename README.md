@@ -14,13 +14,13 @@ Demonstrate production-quality concurrent queue design for systems requiring mul
 
 ## Implementation
 
-### `MPMCQueue<T, N>` — Lock-Free MPMC
+### `MPMCQueueLF<T, N>` — Lock-Free MPMC
 
 A fixed-capacity, lock-free queue supporting any number of concurrent producers and consumers. Uses Dmitry Vyukov's sequence number algorithm: each slot carries an atomic sequence number that coordinates producers and consumers without locks or ABA issues.
 
 ```cpp
 template<typename T, std::size_t N>
-class MPMCQueue { ... };
+class MPMCQueueLF { ... };
 ```
 
 **Template parameters:**
@@ -62,8 +62,8 @@ class MPMCQueue { ... };
 
 ## How It Compares to SPSC
 
-| Property | `SPSCQueueLF` | `MPMCQueue` |
-|----------|--------------|-------------|
+| Property | `SPSCQueueLF` | `MPMCQueueLF` |
+|----------|--------------|--------------|
 | Producers | 1 | N |
 | Consumers | 1 | N |
 | Synchronization | Atomic load/store | CAS |
