@@ -20,6 +20,25 @@ public:
 
     template<typename U>
     bool try_push(U&& val) {
+        std::size_t tail = m_tail.load(std::memory_order_relaxed);
+
+        while (true) {
+            Slot& slot = m_buffer[tail & (N - 1)];
+            std::size_t seq = slot.m_sequence.load(std::memory_order_acquire);
+            std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(tail);
+
+            if (diff == 0) {
+                if (m_tail.compare_exchange_weak(tail, tail + 1, std::memory_order_relaxed))  {
+                    slot.m_value = std::forward<U>(val);
+                    slot.m_sequence.store(tail + 1, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false;  // full
+            } else {
+                tail = m_tail.load(std::memory_order_relaxed);  // another producer advanced tail, retry
+            }
+        }
     }
 
     std::optional<T> try_pop() {
@@ -37,8 +56,8 @@ public:
 
 private:
     struct Slot {
-        std::atomic<std::size_t> sequence;
-        T value;
+        std::atomic<std::size_t> m_sequence;
+        T m_value;
     };
 
     alignas(kCacheLine) std::array<Slot, N> m_buffer;
