@@ -42,7 +42,13 @@ public:
     }
 
     std::optional<T> try_pop() {
-        
+        std::size_t head = m_head.load(std::memory_order_relaxed);
+
+        while(true) {
+            Slot& slot = m_buffer[head & (N - 1)];
+            std::size_t seq = slot.m_sequence.load(std::memory_order_acquire);
+            std::ptrdiff_t diff = static_cast<std::prtdiff_t>(seq) - static_cast<std::ptrdiff_t>(head);
+        }
     }
 
     bool empty() const noexcept {
