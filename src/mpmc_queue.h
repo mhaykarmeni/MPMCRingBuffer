@@ -1,9 +1,11 @@
+#pragma once
 #include <atomic>
 #include <optional>
 #include <array>
 #include <cstddef>
+#include <mutex>
 
-inline constexpr std::size_t kCacheLine = std::hardware_destructive_interference_size;
+inline constexpr std::size_t kCacheLine = 64;
 
 template <typename T, std::size_t N>
 class MPMCQueueLF {
@@ -91,4 +93,58 @@ private:
     alignas(kCacheLine) std::array<Slot, N> m_buffer;
     alignas(kCacheLine) std::atomic<std::size_t> m_tail{0};
     alignas(kCacheLine) std::atomic<std::size_t> m_head{0};
+};
+
+// ── Mutex-based MPMC queue ───────────────────────────────────────────────────
+
+template <typename T, std::size_t N>
+class MPMCQueueMtx {
+    static_assert(N >= 2 && (N & (N - 1)) == 0, "N must be a power of 2");
+public:
+    MPMCQueueMtx() = default;
+    MPMCQueueMtx(const MPMCQueueMtx&) = delete;
+    MPMCQueueMtx& operator=(const MPMCQueueMtx&) = delete;
+    MPMCQueueMtx(MPMCQueueMtx&&) = delete;
+    MPMCQueueMtx& operator=(MPMCQueueMtx&&) = delete;
+
+    template<typename U>
+    bool try_push(U&& val) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_size == N) return false;
+        m_buffer[m_tail & (N - 1)] = std::forward<U>(val);
+        ++m_tail;
+        ++m_size;
+        return true;
+    }
+
+    std::optional<T> try_pop() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_size == 0) return std::nullopt;
+        T val = std::move(m_buffer[m_head & (N - 1)]);
+        ++m_head;
+        --m_size;
+        return val;
+    }
+
+    bool empty() const noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_size == 0;
+    }
+
+    bool full() const noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_size == N;
+    }
+
+    std::size_t size() const noexcept {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_size;
+    }
+
+private:
+    std::array<T, N>  m_buffer{};
+    std::size_t       m_head{0};
+    std::size_t       m_tail{0};
+    std::size_t       m_size{0};
+    mutable std::mutex m_mutex;
 };

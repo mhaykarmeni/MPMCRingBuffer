@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/mhaykarmeni/MPMCRingBuffer/actions/workflows/ci.yml/badge.svg)
 
-A bounded, lock-free Multi-Producer Multi-Consumer (MPMC) ring buffer in modern C++20 using Vyukov's sequence number algorithm.
+A bounded, lock-free Multi-Producer Multi-Consumer (MPMC) ring buffer in modern C++20 using Vyukov's sequence number algorithm, with a mutex-based reference implementation for comparison.
 
 ---
 
@@ -12,7 +12,7 @@ Demonstrate production-quality concurrent queue design for systems requiring mul
 
 ---
 
-## Implementation
+## Implementations
 
 ### `MPMCQueueLF<T, N>` — Lock-Free MPMC
 
@@ -23,13 +23,24 @@ template<typename T, std::size_t N>
 class MPMCQueueLF { ... };
 ```
 
-**Template parameters:**
+### `MPMCQueueMtx<T, N>` — Mutex-Based MPMC
+
+Same API, same ring buffer layout, but all access is serialized through a single `std::mutex`. Simpler implementation — serves as a correctness baseline and throughput comparison target.
+
+```cpp
+template<typename T, std::size_t N>
+class MPMCQueueMtx { ... };
+```
+
+**Template parameters (both classes):**
 - `T` — element type (should be trivially copyable for best performance)
 - `N` — capacity; must be a power of 2 (enforced with `static_assert`)
 
 ---
 
 ## API
+
+Both classes expose identical interfaces:
 
 ### 1. `bool try_push(const T& value)` / `bool try_push(T&& value)`
 - Enqueues one element. Returns `true` on success, `false` if full.
@@ -50,25 +61,85 @@ class MPMCQueueLF { ... };
 
 ---
 
-## Design Features
+## Vyukov's Sequence Number Algorithm
 
-- **Vyukov's sequence number algorithm** — each slot carries an `std::atomic<std::size_t> sequence`. Producers claim slots by CAS on `m_tail` and signal readiness by writing `sequence = tail + 1`. Consumers claim slots by CAS on `m_head` and recycle slots by writing `sequence = head + N`. Eliminates the ABA problem without hazard pointers or epochs.
-- **CAS-based slot claiming** — multiple producers and consumers compete via `compare_exchange_weak` on `m_head` / `m_tail`; only one thread wins each slot.
-- **Cache line isolation** — `m_head` and `m_tail` on separate `alignas(kCacheLine)` cache lines to prevent false sharing between producers and consumers.
-- **Index wrapping** — bitmask `index & (N - 1)` instead of modulo; requires N to be a power of 2.
-- **No heap allocation** — internal buffer is a plain `std::array<Slot, N>`.
+The core problem in MPMC queues: after winning a CAS to claim a slot index, a thread has no way to know whether the previous occupant has finished with that slot. Without coordination:
+
+- A consumer can read a slot a producer hasn't finished writing yet → reads garbage
+- A producer can write a slot a consumer is still reading → data race, undefined behavior
+
+The sequence number on each slot solves both. It acts as a per-slot state machine that tells every thread exactly who owns the slot right now.
+
+### Slot lifecycle
+
+```
+seq = i        → ready for producer (empty, lap 0)
+seq = i + 1    → ready for consumer (producer finished writing)
+seq = i + N    → ready for producer again (consumer finished reading, lap 1)
+...
+```
+
+### Producer (`try_push`)
+
+```
+tail = m_tail.load(relaxed)
+loop:
+    slot = buffer[tail & (N-1)]
+    seq  = slot.sequence.load(acquire)
+    diff = (ptrdiff_t)seq - (ptrdiff_t)tail   // signed!
+
+    if diff == 0:    slot is ready → CAS(m_tail, tail, tail+1) to claim
+                     write value; slot.sequence = tail+1  (signals consumer)
+                     return true
+    if diff < 0:     consumer hasn't recycled yet → FULL, return false
+    if diff > 0:     another producer claimed this tail → reload, retry
+```
+
+### Consumer (`try_pop`)
+
+```
+head = m_head.load(relaxed)
+loop:
+    slot = buffer[head & (N-1)]
+    seq  = slot.sequence.load(acquire)
+    diff = (ptrdiff_t)seq - (ptrdiff_t)(head+1)
+
+    if diff == 0:    producer finished writing → CAS(m_head, head, head+1) to claim
+                     read value; slot.sequence = head+N  (recycles for next lap)
+                     return value
+    if diff < 0:     producer hasn't written yet → EMPTY, return nullopt
+    if diff > 0:     another consumer claimed this head → reload, retry
+```
+
+### Why this eliminates ABA
+
+Classic lock-free structures using pointer CAS suffer ABA: a pointer can be freed and reallocated at the same address, making a CAS succeed on stale state. Here no pointers are CAS'd — only monotonically increasing counters. A slot cannot appear to be in an earlier generation because the sequence number strictly increases each lap.
+
+### Why the diff is signed
+
+`m_tail` and `m_head` are `size_t` (unsigned) and increment forever. The subtraction `seq - tail` is cast to `ptrdiff_t` so underflow produces a meaningful negative — without the cast, a behind-schedule slot would give a huge positive number and "full" would never be detected.
 
 ---
 
-## How It Compares to SPSC
+## Design Features (`MPMCQueueLF`)
 
-| Property | `SPSCQueueLF` | `MPMCQueueLF` |
-|----------|--------------|--------------|
-| Producers | 1 | N |
-| Consumers | 1 | N |
-| Synchronization | Atomic load/store | CAS |
-| ABA concern | None (ownership separation) | Handled by sequence numbers |
-| Throughput (1P1C) | Higher | Lower (CAS overhead) |
+- **Vyukov's sequence number algorithm** — eliminates ABA and coordinates producers/consumers without locks
+- **CAS-based slot claiming** — `compare_exchange_weak` on `m_head`/`m_tail`; only one thread wins each slot
+- **Cache line isolation** — `m_head`, `m_tail`, and `m_buffer` on separate `alignas(64)` cache lines to prevent false sharing
+- **Bitmask index wrapping** — `tail & (N-1)` instead of `tail % N`; requires N to be a power of 2
+- **No heap allocation** — internal buffer is a plain `std::array<Slot, N>`
+
+---
+
+## How `MPMCQueueLF` Compares to `MPMCQueueMtx`
+
+| Property | `MPMCQueueLF` | `MPMCQueueMtx` |
+|----------|--------------|----------------|
+| Synchronization | CAS + sequence numbers | Single `std::mutex` |
+| Scalability | Producers/consumers work in parallel per-slot | All threads serialize through one lock |
+| Latency | Near-zero on uncontended path | Syscall overhead on every op |
+| ABA protection | Sequence numbers | Not needed (mutex excludes all races) |
+| Code complexity | Higher | Lower |
 
 ---
 
@@ -77,12 +148,12 @@ class MPMCQueueLF { ... };
 ```
 MPMCRingBuffer/
 ├── src/
-│   └── mpmc_queue.h         # header-only implementation
+│   ├── mpmc_queue.h         # header-only: MPMCQueueLF + MPMCQueueMtx
+│   └── main.cpp             # smoke test / demo
 ├── tests/
-│   └── mpmc_queue_test.cpp  # Google Test suite
+│   └── mpmc_queue_test.cpp  # Google Test suite (19 tests)
 ├── bench/
 │   └── mpmc_queue_bench.cpp # Google Benchmark suite
-├── src/main.cpp
 ├── CMakeLists.txt
 └── README.md
 ```
@@ -90,6 +161,8 @@ MPMCRingBuffer/
 ---
 
 ## Tests (`tests/mpmc_queue_test.cpp`)
+
+### `MPMCQueueLF`
 
 | Test | What it verifies |
 |------|-----------------|
@@ -105,6 +178,19 @@ MPMCRingBuffer/
 | `Concurrent_2P2C` | 2 producers + 2 consumers, verify all items received exactly once |
 | `Concurrent_4P4C` | 4 producers + 4 consumers, verify all items received exactly once |
 
+### `MPMCQueueMtx`
+
+| Test | What it verifies |
+|------|-----------------|
+| `PushPop_SingleElement` | push one, pop one, correct value |
+| `TryPush_WhenFull_ReturnsFalse` | push N elements, next push returns false |
+| `TryPop_WhenEmpty_ReturnsNullopt` | pop on empty queue returns `std::nullopt` |
+| `FIFO_Order` | elements come out in the same order they went in |
+| `EmptyAndFull` | empty() and full() return correct states |
+| `Concurrent_1P1C` | 1 producer + 1 consumer, 65536 items, verify no loss |
+| `Concurrent_2P2C` | 2 producers + 2 consumers, verify all items received exactly once |
+| `Concurrent_4P4C` | 4 producers + 4 consumers, verify all items received exactly once |
+
 ---
 
 ## Benchmarks (`bench/mpmc_queue_bench.cpp`)
@@ -115,12 +201,10 @@ MPMCRingBuffer/
 | `BM_Throughput_2P2C` | 2 producers + 2 consumers sustained throughput |
 | `BM_Throughput_4P4C` | 4 producers + 4 consumers sustained throughput |
 | `BM_Latency_RTT` | round-trip time: producer pushes, consumer pops and pushes back |
-| `BM_SPSC_Throughput_1P1C` | `SPSCQueueLF` 1P1C baseline for direct comparison |
-| `BM_SPSC_Latency_RTT` | `SPSCQueueLF` RTT baseline |
 
 ### Results (Intel Core Ultra 7 155U, 19GB RAM, 2.7GHz, Ubuntu 24.04 WSL2, GCC 14.2, Release build)
 
-*To be filled after implementation.*
+*To be filled after benchmark run.*
 
 ---
 
@@ -140,12 +224,12 @@ Uses CMake with:
 ```bash
 cmake -S . -B build
 cmake --build build
-cd build && ctest --output-on-failure
+./build/mpmc_tests
 ```
 
 ### Release build (for accurate benchmarks)
 ```bash
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DMPMC_BUILD_BENCH=ON
 cmake --build build-release
 ./build-release/mpmc_bench
 ```
@@ -161,7 +245,7 @@ cmake -S . -B build-tsan \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
     -DMPMC_BUILD_BENCH=OFF
 cmake --build build-tsan
-cd build-tsan && ctest --output-on-failure
+./build-tsan/mpmc_tests
 ```
 
 Expected: all tests pass, zero data race reports.
@@ -170,7 +254,7 @@ Expected: all tests pass, zero data race reports.
 
 ## Acceptance Criteria
 
-- [ ] All tests pass under TSan with zero data race reports
+- [x] All 19 tests pass under TSan with zero data race reports
 - [ ] Lock-free throughput > 100M ops/sec on modern hardware (1P1C)
-- [ ] `try_push` / `try_pop` contain zero heap allocations
-- [ ] Code compiles clean under `-Wall -Wextra -Wpedantic` with no warnings
+- [x] `try_push` / `try_pop` contain zero heap allocations
+- [x] Code compiles clean under `-Wall -Wextra -Wpedantic` with no warnings
