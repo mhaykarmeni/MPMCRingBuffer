@@ -11,7 +11,7 @@ class MPMCQueueLF {
 public:
     MPMCQueueLF() {
         for (std::size_t i = 0; i < N; ++i)
-            m_buffer[i].sequence.store(i, std::memory_order_relaxed);
+            m_buffer[i].m_sequence.store(i, std::memory_order_relaxed);
     }
     MPMCQueueLF(const MPMCQueueLF&) = delete;
     MPMCQueueLF& operator=(const MPMCQueueLF&) = delete;
@@ -33,9 +33,11 @@ public:
                     slot.m_sequence.store(tail + 1, std::memory_order_release);
                     return true;
                 }
-            } else if (diff < 0) {
+            } 
+            else if (diff < 0) {
                 return false;  // full
-            } else {
+            } 
+            else {
                 tail = m_tail.load(std::memory_order_relaxed);  // another producer advanced tail, retry
             }
         }
@@ -44,10 +46,24 @@ public:
     std::optional<T> try_pop() {
         std::size_t head = m_head.load(std::memory_order_relaxed);
 
-        while(true) {
+        while (true) {
             Slot& slot = m_buffer[head & (N - 1)];
             std::size_t seq = slot.m_sequence.load(std::memory_order_acquire);
-            std::ptrdiff_t diff = static_cast<std::prtdiff_t>(seq) - static_cast<std::ptrdiff_t>(head);
+            std::ptrdiff_t diff = static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(head) - 1;
+
+            if (diff == 0) {
+                if (m_head.compare_exchange_weak(head, head + 1, std::memory_order_relaxed)) {
+                    T tmpVal = slot.m_value;
+                    slot.m_sequence.store(head + N, std::memory_order_release);
+                    return std::optional<T>(std::move(tmpVal));
+                }
+            }
+            else if (diff < 0) {
+                return std::nullopt;
+            }
+            else {
+                head = m_head.load(std::memory_order_relaxed);
+            }
         }
     }
 
