@@ -76,10 +76,10 @@ public:
     }
 
     std::size_t size() const noexcept {
-        const tail = m_tail.load(std::memory_order_relaxed); 
-        const head = m_head.load(std::memory_order_relaxed);
+        const std::size_t tail = m_tail.load(std::memory_order_relaxed); 
+        const std::size_t head = m_head.load(std::memory_order_relaxed);
         //if m_head is loaded after m_tail advances and a consumer races in between, you could get m_head > m_tail momentarily
-        return tail > head ? tail -head : 0;
+        return tail > head ? tail - head : 0;
     }
 
 private:
