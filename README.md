@@ -206,7 +206,7 @@ MPMCRingBuffer/
 
 Benchmarks cover the top-5 most common real-world producer/consumer configurations.
 
-### Results (Intel Core Ultra 7 155U, 16 cores @ 2.0GHz, Ubuntu 24.04 WSL2, GCC 14.1, Release build)
+### Results (AMD Ryzen 7 7730U, 16 threads @ 2.0GHz, 7.6GB RAM, Ubuntu 24.04 WSL2, GCC 14.1, Release build)
 
 | Rank | Scenario | Producers | Consumers | `MPMCQueueLF` (M ops/sec) | `MPMCQueueMtx` (M ops/sec) | LF speedup |
 |:----:|----------|:---------:|:---------:|:-------------------------:|:--------------------------:|:----------:|
