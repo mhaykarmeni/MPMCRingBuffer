@@ -217,6 +217,19 @@ Benchmarks cover the top-5 most common real-world producer/consumer configuratio
 | 5    | 4P1C     | 4         | 1         | **6.4**                   | 3.3                        | 1.9x       |
 | —    | RTT      | 1         | 1         | **205 ns**                | 2429 ns                    | **11.8x**  |
 
+### Results (Intel Core Ultra 7 155U, 7 cores @ 2.7GHz, Ubuntu 24.04 WSL2, GCC 14.2, Release build)
+
+| Rank | Scenario | Producers | Consumers | `MPMCQueueLF` (M ops/sec) | `MPMCQueueMtx` (M ops/sec) | LF speedup |
+|:----:|----------|:---------:|:---------:|:-------------------------:|:--------------------------:|:----------:|
+| 1    | 1P1C     | 1         | 1         | **56.6**                  | 5.9                        | **9.6x**   |
+| 2    | 2P1C     | 2         | 1         | **14.5**                  | 6.9                        | 2.1x       |
+| 3    | 2P2C     | 2         | 2         | **14.4**                  | 6.8                        | 2.1x       |
+| 4    | 4P1C     | 4         | 1         | **8.4**                   | 4.0                        | 2.1x       |
+| 5    | 1P4C     | 1         | 4         | **8.4**                   | 3.8                        | 2.2x       |
+| —    | RTT      | 1         | 1         | **173 ns**                | 869 ns                     | **5.0x**   |
+
+---
+
 #### Key observations
 
 - **1P1C**: lock-free wins 8.7x — no contention, CAS succeeds on the first try almost every time, zero syscall overhead
